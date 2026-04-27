@@ -1,14 +1,15 @@
 """Parse a voxl-logger flight folder into clean CSVs.
 
-Reads:
+Reads (voxl-logger nests pipe captures under run/mpa/; fallback to flat
+layout for mock data):
   <flight>/info.json
-  <flight>/imu_apps/data.csv         (voxl-logger IMU CSV)
-  <flight>/imu_px4/data.csv          (voxl-logger IMU CSV)
-  <flight>/gps/data.csv              (B2 voxl-clean-logger output, optional)
+  <flight>/run/mpa/imu_apps/data.csv         (or <flight>/imu_apps/data.csv)
+  <flight>/run/mpa/imu_mavlink/data.csv      (or imu_px4 on older SDKs)
+  <flight>/gps/data.csv                      (B2 voxl-clean-logger output, optional)
 
 Writes:
   <flight>/clean/imu_apps.csv
-  <flight>/clean/imu_px4.csv
+  <flight>/clean/imu_mavlink.csv     (or imu_px4.csv, mirroring source name)
   <flight>/clean/gps.csv             (if gps source present)
   <flight>/clean/unified.csv         (IMU rows + nearest-prior GPS fix)
 
@@ -93,19 +94,21 @@ def parse_flight(flight_dir: Path) -> int:
               f"channels: {info.get('n_channels', '?')}, "
               f"duration_s: {info.get('duration_s', '?')}")
 
+    def _pipe_dir(name: str) -> Path:
+        nested = flight_dir / "run" / "mpa" / name
+        return nested if nested.is_dir() else flight_dir / name
+
     imu_frames: dict[str, pd.DataFrame] = {}
-    for name in ("imu_apps", "imu_px4"):
-        csv = flight_dir / name / "data.csv"
+    for name in ("imu_apps", "imu_mavlink", "imu_px4"):
+        csv = _pipe_dir(name) / "data.csv"
         if csv.exists():
             df = _read_imu(csv)
             imu_frames[name] = df
             df.to_csv(out_dir / f"{name}.csv", index=False)
             print(f"  {name}: {len(df):>7d} samples -> clean/{name}.csv")
-        else:
-            print(f"  {name}: not present")
 
     gps = None
-    gps_csv = flight_dir / "gps" / "data.csv"
+    gps_csv = _pipe_dir("gps") / "data.csv"
     if gps_csv.exists():
         gps = _read_gps(gps_csv)
         gps.to_csv(out_dir / "gps.csv", index=False)
@@ -113,13 +116,14 @@ def parse_flight(flight_dir: Path) -> int:
     else:
         # voxl-logger MAVLink-only flights have data.raw but no decoded csv
         for raw_name in ("mavlink_gps_raw_int", "vvpx4_vehicle_gps"):
-            if (flight_dir / raw_name / "data.raw").exists():
-                print(f"  note: {raw_name}/data.raw present but not decoded; "
+            if _pipe_dir(raw_name).is_dir():
+                print(f"  note: {raw_name}/ present but not decoded; "
                       f"use voxl-clean-logger (B2) for clean GPS CSV")
                 break
 
     if imu_frames:
-        primary = imu_frames.get("imu_apps") or next(iter(imu_frames.values()))
+        primary = imu_frames["imu_apps"] if "imu_apps" in imu_frames \
+            else next(iter(imu_frames.values()))
         unified = _unify(primary, gps)
         unified.to_csv(out_dir / "unified.csv", index=False)
         print(f"  unified:  {len(unified):>7d} rows    -> clean/unified.csv")

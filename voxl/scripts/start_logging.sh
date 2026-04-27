@@ -24,12 +24,11 @@ Usage: $(basename "$0") [-t seconds] [-n note] [-d output_dir]
   -h            this help
 
 Pipes captured:
-  imu_apps                (apps-proc IMU,  imu_data_t)
-  imu_px4                 (sDSP IMU,       imu_data_t)
-  mavlink_gps_raw_int     (GPS_RAW_INT,    mavlink_message_t -> raw)
-  vvpx4_vehicle_gps       (vehicle GPS,    mavlink_message_t -> raw)
+  imu_apps                (apps-proc IMU,        imu_data_t)
+  imu_mavlink             (flight-controller IMU, imu_data_t)
+  mavlink_gps_raw_int     (GPS_RAW_INT,          mavlink_message_t -> raw)
 
-Note: GPS pipes are MAVLink and are written as raw mavlink_message_t
+Note: GPS pipe is MAVLink and is written as raw mavlink_message_t
 records by voxl-logger. Use voxl-clean-logger (B2) for decoded GPS CSV.
 EOF
 }
@@ -52,9 +51,8 @@ fi
 ARGS=(
     -d "$OUT_DIR"
     -i imu_apps
-    -i imu_px4
+    -i imu_mavlink
     -m mavlink_gps_raw_int
-    -m vvpx4_vehicle_gps
 )
 [[ -n "$TIMEOUT" ]] && ARGS+=( -t "$TIMEOUT" )
 [[ -n "$NOTE"    ]] && ARGS+=( -n "$NOTE" )
