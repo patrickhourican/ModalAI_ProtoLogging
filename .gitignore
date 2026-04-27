@@ -1,0 +1,20 @@
+# pulled / generated flight data
+flights/*
+!flights/.gitkeep
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# C build artifacts
+voxl/logger/build/
+voxl/logger/*.o
+voxl/logger/voxl-clean-logger
+
+# editor / OS
+.vscode/
+.idea/
+.DS_Store

@@ -1,0 +1,3 @@
+ModalAI Prototyping
+- Setup some type of way to view the video feed from the modalAI in qgroundcontrol in real time
+- Run a pipe to log all IMU data and GPS data in a clean readable format
