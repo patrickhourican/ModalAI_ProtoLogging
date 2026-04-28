@@ -1,0 +1,14 @@
+# SITL camera enablement parameters, chained after copter.parm by launch.sh.
+# Without these, AP_Camera does not instantiate any backend and
+# DO_DIGICAM_CONTROL / IMAGE_START_CAPTURE are silently no-ops.
+#
+# CAM1_TYPE = 1 -> Servo backend (the simplest trigger model; emits
+#                  CAMERA_FEEDBACK on every shot via log_picture()).
+# SERVO9_FUNCTION = 10 -> assigns AUX1 (servo channel 9) to k_cam_trigger,
+#                  giving the Servo backend a real PWM output to drive.
+#                  Channels 1-8 are taken by motor outputs on a quad.
+#
+# Note: CAM1_TYPE is read once at boot. Changing it at runtime requires
+# a reboot before the backend is allocated.
+CAM1_TYPE        1
+SERVO9_FUNCTION  10

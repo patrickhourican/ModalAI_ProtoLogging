@@ -1,0 +1,77 @@
+{
+  "_schema_version": 1,
+  "_description": "ModalAI Starling 2 hi-resolution color camera (M0107 IMX412 with M12 120-deg lens). Used as the source of truth for camera intrinsics, sensor geometry, and mount transform when synthesizing imagery from SITL flight data.",
+  "_source": [
+    "https://docs.modalai.com/M0107  (M0107 IMX412 m12 120-deg FOV datasheet)",
+    "https://docs.modalai.com/starling-2-datasheet  (Starling 2 C26 config: IMX412 + TOF + dual AR0144)",
+    "https://docs.modalai.com/M0161  (identical optical block, used for cross-checking specs)"
+  ],
+  "_notes": [
+    "Published FOV (120.4 / 93.5 deg) is for the as-built lens including barrel distortion.",
+    "Geometric pinhole FOV computed from sensor + focal length differs (DFOV ~111 deg, HFOV ~98.7 deg, VFOV ~82.2 deg).",
+    "Use 'fov_deg' (manufacturer values) for footprint estimates and EXIF; use 'pinhole' block for projection math.",
+    "Distortion coefficients are unknown from public docs; left as zeros for an ideal-pinhole approximation. Replace with calibrated values if available.",
+    "mount_transform here is the nominal forward-facing FPV orientation on Starling 2. Verify against the actual vehicle's voxl-camera-server config and extrinsics calibration before using for georeferencing."
+  ],
+
+  "name": "starling2_hires",
+  "vendor": "ModalAI",
+  "module": "M0107",
+  "sensor": {
+    "model": "Sony IMX412",
+    "type": "1/2.3",
+    "shutter": "rolling",
+    "resolution_px": [4056, 3040],
+    "pixel_pitch_um": 1.55,
+    "size_mm": [6.287, 4.712],
+    "diagonal_mm": 7.857,
+    "bit_depth": 10,
+    "color_filter": "Bayer RGGB"
+  },
+
+  "lens": {
+    "part_no": "27629F-16MAS-CM",
+    "mount": "M12",
+    "focal_length_mm": 2.7,
+    "f_number": null,
+    "ir_filter": "optional"
+  },
+
+  "fov_deg": {
+    "diagonal": 120.4,
+    "horizontal": 93.5,
+    "vertical": null,
+    "_note": "Manufacturer-published values; vertical is omitted because the M0107 datasheet's listed value is inconsistent with horizontal/diagonal."
+  },
+
+  "pinhole": {
+    "_note": "Ideal-pinhole intrinsics derived from sensor + focal length. Useful for footprint projection and synthetic image generation. Real lens has barrel distortion; see distortion block.",
+    "fx_px": 1742.13,
+    "fy_px": 1742.13,
+    "cx_px": 2028.0,
+    "cy_px": 1520.0,
+    "hfov_deg": 98.7,
+    "vfov_deg": 82.2,
+    "dfov_deg": 111.0
+  },
+
+  "distortion": {
+    "model": "opencv_plumb_bob",
+    "k1": 0.0, "k2": 0.0, "p1": 0.0, "p2": 0.0, "k3": 0.0,
+    "_note": "Placeholder zeros. Replace with values from voxl-calibrate or OpenCV calibration of the specific unit."
+  },
+
+  "video_modes": [
+    {"resolution": [4056, 3040], "fps_min": 15, "fps_max": 60},
+    {"resolution": [3840, 2160], "fps_min": 15, "fps_max": 80},
+    {"resolution": [1920, 1080], "fps_min": 15, "fps_max": 240}
+  ],
+
+  "mount_transform": {
+    "_description": "Camera frame relative to vehicle body frame (FRD: +x forward, +y right, +z down). Translation in metres, rotation in degrees, applied as R_z(yaw) * R_y(pitch) * R_x(roll). Camera optical axis points along +x_camera.",
+    "translation_m": [0.06, 0.0, 0.02],
+    "rotation_deg": {"roll": 0.0, "pitch": 0.0, "yaw": 0.0},
+    "optical_axis": "forward",
+    "_caveat": "Translation is a nominal estimate from Starling 2 photos; rotation assumes the FPV (forward) configuration. The Starling 2 also ships configs where the hires camera is angled down -- check the actual extrinsics for the unit in question."
+  }
+}
