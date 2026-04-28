@@ -25,6 +25,31 @@ from pymavlink import mavutil
 
 CONNECTION_DEFAULT = "udpin:0.0.0.0:14550"
 
+# PX4's GCS mavlink instance (UDP 14550) doesn't stream HIGHRES_IMU /
+# GPS_RAW_INT by default; request them explicitly via SET_MESSAGE_INTERVAL.
+STREAM_REQUESTS = [
+    (mavutil.mavlink.MAVLINK_MSG_ID_HIGHRES_IMU,  5_000),    # 200 Hz
+    (mavutil.mavlink.MAVLINK_MSG_ID_GPS_RAW_INT,  200_000),  # 5 Hz
+]
+
+IMU_COLUMNS = ["timestamp_ns", "ax_ms2", "ay_ms2", "az_ms2",
+               "gx_rads", "gy_rads", "gz_rads", "temp_c"]
+GPS_COLUMNS = ["timestamp_ns", "time_usec", "fix_type",
+               "lat_deg", "lon_deg", "alt_m",
+               "eph_m", "epv_m", "vel_ms", "cog_deg",
+               "satellites_visible"]
+
+
+def request_streams(mav) -> None:
+    for msg_id, interval_us in STREAM_REQUESTS:
+        mav.mav.command_long_send(
+            mav.target_system, mav.target_component,
+            mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
+            0,
+            msg_id, interval_us,
+            0, 0, 0, 0, 0,
+        )
+
 
 def capture(out_dir: Path, duration_s: float, conn_str: str) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -35,6 +60,9 @@ def capture(out_dir: Path, duration_s: float, conn_str: str) -> int:
     mav = mavutil.mavlink_connection(conn_str)
     mav.wait_heartbeat(timeout=30)
     print(f"  heartbeat from sysid={mav.target_system} compid={mav.target_component}")
+
+    request_streams(mav)
+    print(f"  requested HIGHRES_IMU @ 200 Hz, GPS_RAW_INT @ 5 Hz")
 
     imu_rows: list[dict] = []
     gps_rows: list[dict] = []
@@ -79,8 +107,12 @@ def capture(out_dir: Path, duration_s: float, conn_str: str) -> int:
                 "satellites_visible": msg.satellites_visible,
             })
 
-    imu = pd.DataFrame(imu_rows).sort_values("timestamp_ns").reset_index(drop=True)
-    gps = pd.DataFrame(gps_rows).sort_values("timestamp_ns").reset_index(drop=True)
+    imu = pd.DataFrame(imu_rows, columns=IMU_COLUMNS)
+    gps = pd.DataFrame(gps_rows, columns=GPS_COLUMNS)
+    if not imu.empty:
+        imu = imu.sort_values("timestamp_ns").reset_index(drop=True)
+    if not gps.empty:
+        gps = gps.sort_values("timestamp_ns").reset_index(drop=True)
 
     imu.to_csv(clean / "imu.csv", index=False)
     gps.to_csv(clean / "gps.csv", index=False)
@@ -91,6 +123,8 @@ def capture(out_dir: Path, duration_s: float, conn_str: str) -> int:
         unified = pd.merge_asof(imu, gps, on="timestamp_ns", direction="backward")
         unified.to_csv(clean / "unified.csv", index=False)
         print(f"  unified: {len(unified):>6d} rows -> clean/unified.csv")
+    else:
+        print("  unified: skipped (empty imu or gps)")
 
     info = {
         "stack": "px4_sitl",
