@@ -9,15 +9,20 @@ flight plans.
 ```
 sim/
 ├── px4/
-│   ├── launch.sh           boots PX4 SITL + Gazebo, opens QGC
-│   ├── capture.py          pymavlink → CSV in our schema
-│   └── missions/           QGC .plan files (created in QGC, saved here)
+│   ├── launch.sh             boots PX4 SITL + Gazebo, opens QGC
+│   ├── capture.py            pymavlink → CSV in our schema
+│   └── missions/             QGC .plan files (created in QGC, saved here)
 ├── ardupilot/
-│   ├── launch.sh           boots ArduCopter SITL headless (TCP 5760)
-│   ├── capture.py          same CSV schema, MAVLink over TCP 5760
+│   ├── launch.sh             boots ArduCopter SITL headless (TCP 5760)
+│   ├── capture.py            MAVLink → CSV: IMU + GPS + ATTITUDE + CAMERA_FEEDBACK
+│   ├── camera_defaults.parm  SITL boot params: enable CAM1 + servo trigger
+│   ├── run_mission.py        headless QGC .plan replay (arm/takeoff/AUTO/tail)
 │   └── missions/
-└── shared/
-    └── compare.py          load both captures, diff trajectories / IMU
+├── cameras/
+│   └── starling2_hires.json  Starling 2 hi-res camera model (intrinsics + mount)
+├── shared/
+│   └── compare.py            load both captures, diff trajectories / IMU
+└── qgc.sh                    QGroundControl launcher wrapper
 ```
 
 Toolchains (`PX4-Autopilot/`, `ardupilot/`) are NOT in this repo —
@@ -165,6 +170,57 @@ Note that capture.py and QGC cannot both connect to TCP 5760 directly —
 only one TCP client at a time. Either run capture.py against TCP 5760
 on its own, or use the mavproxy fan-out above.
 
+## Telemetry topology
+
+ArduCopter SITL only opens one MAVLink endpoint (TCP 5760). Everything
+else hangs off a single MAVProxy fan-out. Each consumer takes its own
+UDP port so QGC, the headless mission driver, and the capture process
+don't fight over the link.
+
+```
+┌──────────────────────┐        ┌──────────────────────────┐
+│  arducopter (SITL)   │ TCP    │       mavproxy.py        │
+│   physics + EKF +    ├────────▶  --master tcp:5760       │
+│   AP_Camera backend  │  5760  │  --out udp:14550 (QGC)   │
+└──────────────────────┘        │  --out udp:14551 (cap)   │
+                                │  --out udp:14552 (miss)  │
+                                └──┬───────────┬───────────┘
+                                   │           │
+                ┌──────────────────┘           └─────────────┐
+                ▼                                            ▼
+   ┌─────────────────────────┐              ┌─────────────────────────┐
+   │  capture.py  (14551)    │              │  run_mission.py (14552) │
+   │  SET_MESSAGE_INTERVAL:  │              │  upload .plan, arm,     │
+   │   SCALED_IMU2  200 Hz   │              │  takeoff, AUTO, tail    │
+   │   GPS_RAW_INT    5 Hz   │              │  CAM1_TRIGG_DIST set    │
+   │   ATTITUDE      50 Hz   │              │  via PARAM_SET on 14550 │
+   │  event:                 │              └─────────────────────────┘
+   │   CAMERA_FEEDBACK       │
+   │  → flights/<ts>/clean/  │              ┌─────────────────────────┐
+   └─────────────────────────┘              │       QGC (14550)       │
+                                            │   passive map view +    │
+                                            │   manual overrides      │
+                                            └─────────────────────────┘
+```
+
+MAVLink streams subscribed by `capture.py` and where they land:
+
+| Stream            | Source msg          | Rate    | Output CSV       |
+|-------------------|---------------------|---------|------------------|
+| IMU               | `SCALED_IMU2`       | 200 Hz  | `imu.csv`        |
+| GPS fix           | `GPS_RAW_INT`       |   5 Hz  | `gps.csv`        |
+| Attitude (Euler)  | `ATTITUDE`          |  50 Hz  | `attitude.csv`   |
+| Camera trigger    | `CAMERA_FEEDBACK`   |  event  | `triggers.csv`   |
+| (joined)          | IMU + nearest GPS   | 200 Hz  | `unified.csv`    |
+
+Achieved rates over the MAVProxy fan-out are typically lower than the
+requested rates because MAVProxy collapses duplicate messages across
+outputs. For full requested rates, point `capture.py` directly at
+`tcp:127.0.0.1:5760` (without QGC / mission runner attached).
+
+`CAMERA_FEEDBACK` is event-driven and only fires when the AP_Camera
+backend is instantiated. See **Camera triggering** below.
+
 ## Mission workflow
 
 The .plan file is QGC's native JSON; ArduPilot reads it as a series of
@@ -205,17 +261,119 @@ waypoint square, land.
 ## Capture schema
 
 `capture.py` writes the same CSV schema `host/parse_logs.py` produces,
-so simulated captures slot into the same downstream tooling:
+so simulated captures slot into the same downstream tooling. The
+ArduPilot capture additionally writes attitude and camera-trigger
+streams used by the imagery / georegistration pipeline:
 
 ```
-flights/sim_px4_<ts>/clean/
-├── imu.csv         (timestamp_ns, ax_ms2, ..., temp_c)
-├── gps.csv         (timestamp_ns, time_usec, fix_type, lat_deg, ...)
-└── unified.csv     (IMU rows + nearest-prior GPS fix)
+flights/sim_apm_<ts>/
+├── info.json          run metadata (connection, duration, row counts)
+└── clean/
+    ├── imu.csv        timestamp_ns, ax_ms2, ..., temp_c                (200 Hz)
+    ├── gps.csv        timestamp_ns, time_usec, fix_type, lat_deg, ...    (5 Hz)
+    ├── attitude.csv   timestamp_ns, roll/pitch/yaw_deg, rates rad/s     (50 Hz)
+    ├── triggers.csv   timestamp_ns, img_idx, lat/lon/alt, r/p/y         (event)
+    └── unified.csv    IMU rows + nearest-prior GPS fix
 ```
 
-This means PlotJuggler, your parsing tests, and `shared/compare.py` all
-work the same on real and simulated flights.
+`triggers.csv` is the geotag table for the imagery pipeline: one row
+per shutter event from `CAMERA_FEEDBACK`, each carrying lat/lon, MSL
+and relative altitude, and the vehicle's roll/pitch/yaw at the moment
+of the shot. Pair it with `sim/cameras/starling2_hires.json` (sensor
+geometry, intrinsics, mount transform) to project a footprint, write
+EXIF/MAVLink geotags, or render a synthetic frame against a reference
+3D model for georegistration testing.
+
+`attitude.csv` is the dense interpolation source for any
+non-shot-aligned timestamps (e.g. resampling to camera-IMU offsets, or
+filling in attitude between geotag rows).
+
+PlotJuggler, parsing tests, and `shared/compare.py` all work the same
+on real and simulated flights.
+
+## Camera triggering (ArduPilot SITL)
+
+The AP_Camera backend is **not** instantiated by default in SITL — by
+default `CAM1_TYPE = 0` and any `DO_DIGICAM_CONTROL` /
+`IMAGE_START_CAPTURE` / `DO_SET_CAM_TRIGG_DIST` is silently a no-op.
+
+`sim/ardupilot/camera_defaults.parm` is chained after `copter.parm` by
+`launch.sh` and sets:
+
+```
+CAM1_TYPE        1     # Servo backend; emits CAMERA_FEEDBACK on every shot
+SERVO9_FUNCTION  10    # AUX1 -> k_cam_trigger PWM output
+```
+
+`CAM1_TYPE` is read **once at boot**. Setting it via `PARAM_SET` at
+runtime exposes the param block but does not allocate the backend
+until the autopilot reboots — keep it in the .parm file.
+
+Trigger sources, in order of operational realism:
+
+| Trigger                          | Use it for                            |
+|----------------------------------|---------------------------------------|
+| `MAV_CMD_DO_DIGICAM_CONTROL`     | manual one-shot from a script         |
+| `MAV_CMD_IMAGE_START_CAPTURE`    | one-shot or N-shot from QGC / script  |
+| `CAM1_TRIGG_DIST = N` (metres)   | distance-based auto trigger in AUTO   |
+| `MAV_CMD_DO_SET_CAM_TRIGG_DIST`  | mission-item-driven dist trigger      |
+
+Distance-based triggering is the fastest path to a populated
+`triggers.csv` over a real flight: set `CAM1_TRIGG_DIST` via
+`PARAM_SET` on UDP 14550 immediately before starting the mission, and
+the autopilot fires + emits `CAMERA_FEEDBACK` every N metres of
+horizontal travel.
+
+> Modern AP_Camera no longer emits the legacy `CAMERA_TRIGGER` (msg
+> 112). `capture.py` subscribes only to `CAMERA_FEEDBACK` (msg 180),
+> which carries geotag and attitude in a single message.
+
+## GPS-denied capture (vision-nav consumers)
+
+The end goal is a flight dataset that a GPS-denied, vision-based
+navigation stack can ingest as if it had been recorded on a real drone
+without GPS. Two paths:
+
+### A. Capture with GPS, suppress on consumption (default, easiest)
+
+Fly the mission with the standard configuration — full GPS available
+to the EKF and to mission planning — then simply **don't pass
+`gps.csv`** to the vision-nav consumer. `imu.csv`, `attitude.csv`,
+`triggers.csv`, and the rendered imagery are all GPS-independent and
+form a complete GPS-denied input set. `gps.csv` is still useful as
+ground-truth for scoring the vision-nav output.
+
+This is the recommended path for quick iteration: nothing about the
+SITL flight changes, you just split the dataset at the consumer
+boundary.
+
+### B. Fly GPS-denied in SITL (optical flow EKF)
+
+For a stricter test where the autopilot itself has no GPS solution,
+chain ArduPilot's stock optical-flow profile via the
+`EXTRA_PARMS` env var picked up by `launch.sh`:
+
+```bash
+EXTRA_PARMS="$ARDUPILOT_DIR/Tools/autotest/default_params/copter-optflow.parm" \
+    sim/ardupilot/launch.sh
+```
+
+That profile sets `EK3_SRC1_POSXY=0`, `EK3_SRC1_VELXY=5` (optical
+flow), `FLOW_TYPE=10` and `SIM_FLOW_ENABLE=1`, and configures
+`RNGFND1_*` for the SITL rangefinder. The EKF then has to navigate
+from optical-flow velocity + baro/rangefinder altitude only.
+
+Caveats:
+- AUTO missions with absolute lat/lon waypoints will not work without
+  a GPS-derived position estimate; fly LOITER / GUIDED-relative
+  trajectories in this mode, or use path B only for hover / position
+  hold benchmarks.
+- For mission-style replays under GPS denial, use the stock
+  `copter-vicon.parm` profile and feed `VISION_POSITION_ESTIMATE`
+  messages from your vision-nav stack so the EKF has an external
+  position source.
+- `gps.csv` will be empty (or sparse / `fix_type=0`) in this mode by
+  construction; treat it as expected, not a capture bug.
 
 ## Comparing two stacks
 
