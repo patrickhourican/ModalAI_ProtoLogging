@@ -28,24 +28,36 @@ they're 5+ GB each. Clone them into a sibling directory and point
 
 ### Common prerequisites
 ```bash
-.venv/bin/pip install pymavlink matplotlib
-sudo dnf install -y git cmake ninja-build python3-devel
+.venv/bin/pip install -r sim/requirements.txt        # pymavlink, matplotlib
 # QGroundControl: download AppImage from
 #   https://qgroundcontrol.com/downloads/  -> chmod +x QGroundControl.AppImage
 ```
 
-### PX4 SITL
+### PX4 SITL (Docker / podman)
+PX4 SITL on Rocky 9 is run inside the official PX4 simulation
+container. This avoids the apt-only `Tools/setup/ubuntu.sh` install
+path and ships Gazebo Harmonic preinstalled. The host only needs
+`podman` (or `docker`) and a clone of PX4 source for missions / edits.
+
 ```bash
+# 1. host source (used as a bind-mount into the container)
 mkdir -p ~/sim_tools && cd ~/sim_tools
-git clone https://github.com/PX4/PX4-Autopilot.git --recursive
-cd PX4-Autopilot
-bash Tools/setup/ubuntu.sh --no-nuttx       # works on Rocky 9 with minor tweaks
-make px4_sitl gz_x500                       # first build is ~20 min
-# when "Ready for takeoff!" appears, ctrl-C; the build is now cached.
+git clone --recursive https://github.com/PX4/PX4-Autopilot.git
+export PX4_AUTOPILOT_DIR="$HOME/sim_tools/PX4-Autopilot"   # add to ~/.bashrc
+
+# 2. pull the PX4 simulation image (~3 GB, one time)
+podman pull docker.io/px4io/px4-dev-simulation-jammy:latest
+
+# 3. allow the container to talk to the X server (one time per login)
+xhost +SI:localuser:$(id -un)
 ```
-Set in your shell (or in `~/.bashrc`):
+First build inside the container is ~20 min; the build is cached
+under `$PX4_AUTOPILOT_DIR/build/` on the host so subsequent
+`launch.sh` calls boot in seconds.
+
+Headless variant (no Gazebo window, useful over SSH or in CI):
 ```bash
-export PX4_AUTOPILOT_DIR="$HOME/sim_tools/PX4-Autopilot"
+HEADLESS=1 sim/px4/launch.sh
 ```
 
 ### ArduPilot SITL
