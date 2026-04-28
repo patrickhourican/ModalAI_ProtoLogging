@@ -14,6 +14,15 @@ voxl/logger/build/
 voxl/logger/*.o
 voxl/logger/voxl-clean-logger
 
+# SITL toolchains and logs (toolchains live in a sibling dir, never in repo)
+PX4-Autopilot/
+ardupilot/
+sim/**/build/
+sim/**/logs/
+*.ulg
+*.tlog
+*.bin
+
 # editor / OS
 .vscode/
 .idea/
