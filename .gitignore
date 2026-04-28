@@ -15,13 +15,18 @@ voxl/logger/*.o
 voxl/logger/voxl-clean-logger
 
 # SITL toolchains and logs (toolchains live in a sibling dir, never in repo)
-PX4-Autopilot/
-ardupilot/
+/PX4-Autopilot/
+/ardupilot/
 sim/**/build/
 sim/**/logs/
 *.ulg
 *.tlog
+*.tlog.raw
 *.bin
+
+# mavproxy runtime artifacts (created at CWD by --aircraft / param dumps)
+mav.parm
+/phase1_gui/
 
 # editor / OS
 .vscode/

@@ -13,8 +13,8 @@ sim/
 │   ├── capture.py          pymavlink → CSV in our schema
 │   └── missions/           QGC .plan files (created in QGC, saved here)
 ├── ardupilot/
-│   ├── launch.sh           boots ArduPilot SITL + Gazebo
-│   ├── capture.py          same CSV schema, different MAVLink endpoint
+│   ├── launch.sh           boots ArduCopter SITL headless (TCP 5760)
+│   ├── capture.py          same CSV schema, MAVLink over TCP 5760
 │   └── missions/
 └── shared/
     └── compare.py          load both captures, diff trajectories / IMU
@@ -29,9 +29,41 @@ they're 5+ GB each. Clone them into a sibling directory and point
 ### Common prerequisites
 ```bash
 .venv/bin/pip install -r sim/requirements.txt        # pymavlink, matplotlib
-# QGroundControl: download AppImage from
-#   https://qgroundcontrol.com/downloads/  -> chmod +x QGroundControl.AppImage
 ```
+
+### QGroundControl (Rocky 9 / RHEL family)
+
+Tested with QGC v5.0.8 on Rocky 9.x (glibc 2.34), GNOME/X11 session.
+
+```bash
+# 1. download + extract (no fuse2 on stock Rocky 9, so don't try to mount)
+mkdir -p ~/sim_tools && cd ~/sim_tools
+curl -L -o QGroundControl.AppImage \
+  https://github.com/mavlink/qgroundcontrol/releases/download/v5.0.8/QGroundControl-x86_64.AppImage
+chmod +x QGroundControl.AppImage
+./QGroundControl.AppImage --appimage-extract            # produces ./squashfs-root/
+
+# 2. one-time host fixes
+sudo setsebool -P selinuxuser_execmod 1                 # SELinux: QtQml JIT
+sudo usermod -aG dialout $USER                          # QGC startup pre-flight
+sudo systemctl disable --now ModemManager               # QGC startup pre-flight
+
+# 3. launch (sim/qgc.sh wraps `sg dialout` so step 2 takes effect without re-login)
+sim/qgc.sh
+# on hosts with broken/dual GPU drivers (NVIDIA Optimus etc.):
+QGC_SOFTWARE_RENDER=1 sim/qgc.sh
+```
+
+Symptoms → fixes:
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `fusermount: not found` / mount fails | no fuse2 on Rocky 9 | extract + run `AppRun` |
+| Process exits silently, `journalctl -t setroubleshoot` mentions `execmod` | SELinux blocks QtQml JIT | `setsebool -P selinuxuser_execmod 1` |
+| Tiny "must be in dialout / remove modemmanager" dialog then exit | startup pre-flight | usermod + disable ModemManager |
+| Window opens but is black / `NVRM` errors in dmesg | broken GL driver | `QGC_SOFTWARE_RENDER=1 sim/qgc.sh` |
+| `version 'GLIBC_2.35' not found` | AppImage too new for glibc 2.34 | use older QGC release |
+| Window opens but stays "Disconnected" | nothing on UDP 14550 | run mavproxy with `--out udp:127.0.0.1:14550` |
 
 ### PX4 SITL (Docker / podman)
 PX4 SITL on Rocky 9 is run inside the official PX4 simulation
@@ -61,16 +93,29 @@ HEADLESS=1 sim/px4/launch.sh
 ```
 
 ### ArduPilot SITL
+ArduCopter SITL has a built-in physics model and needs no external
+simulator (no Gazebo, no jmavsim). On Rocky 9 the official
+`install-prereqs-ubuntu.sh` won't run, so install the Python deps into
+`.venv` directly and rely on the host's gcc/g++ for the build:
+
 ```bash
-cd ~/sim_tools
-git clone https://github.com/ArduPilot/ardupilot.git --recursive
-cd ardupilot
-Tools/environment_install/install-prereqs-ubuntu.sh -y
-. ~/.profile
+# 1. shallow clone of a stable Copter tag (~1 GB)
+mkdir -p ~/sim_tools && cd ~/sim_tools
+git clone --recursive --depth 1 --shallow-submodules \
+    --branch Copter-4.6.3 https://github.com/ArduPilot/ardupilot.git
+
+# 2. python deps (MAVProxy is only needed if you want a CLI shell or
+#    UDP fan-out; our launch.sh is headless and skips it)
+.venv/bin/pip install MAVProxy pexpect future 'empy<4' lxml
+
+# 3. build the SITL copter binary (~1 min on first build, ccache cached)
+export ARDUPILOT_DIR="$HOME/sim_tools/ardupilot"
+cd "$ARDUPILOT_DIR"
 ./waf configure --board sitl
 ./waf copter
 ```
-Set:
+
+Add to `~/.bashrc`:
 ```bash
 export ARDUPILOT_DIR="$HOME/sim_tools/ardupilot"
 ```
@@ -90,27 +135,70 @@ Terminal 3 (or just open it from your app menu): launch QGC, it
 auto-connects on UDP `14550`.
 
 ### ArduPilot
-Terminal 1:
+Terminal 1 (SITL, headless, MAVLink on TCP 5760):
 ```bash
-sim/ardupilot/launch.sh
+sim/ardupilot/launch.sh             # default model '+'
+# or:  sim/ardupilot/launch.sh quad
 ```
-Terminal 2:
+Terminal 2 (capture telemetry — defaults to tcp:127.0.0.1:5760):
 ```bash
 .venv/bin/python sim/ardupilot/capture.py -o flights/sim_apm_$(date +%Y%m%d_%H%M%S) -t 120
 ```
-ArduPilot SITL exposes MAVLink on UDP `14550` by default too — so QGC
-auto-connects the same way.
+
+QGC over UDP 14550: ArduCopter SITL only exposes TCP 5760. Run
+mavproxy.py as a daemon to fan out to UDP — one port per consumer
+(QGC, capture.py, run_mission.py) so all three can coexist:
+```bash
+# terminal 2: TCP 5760 -> UDP 14550 (QGC) + 14551 (capture) + 14552 (mission runner)
+.venv/bin/mavproxy.py --master tcp:127.0.0.1:5760 \
+                      --out udp:127.0.0.1:14550 \
+                      --out udp:127.0.0.1:14551 \
+                      --out udp:127.0.0.1:14552 \
+                      --non-interactive --daemon
+# terminal 3: QGC (auto-binds UDP 14550)
+sim/qgc.sh
+# terminal 4: capture against the fan-out
+.venv/bin/python sim/ardupilot/capture.py -c udp:127.0.0.1:14551 \
+    -o flights/sim_apm_$(date +%Y%m%d_%H%M%S) -t 120
+```
+Note that capture.py and QGC cannot both connect to TCP 5760 directly —
+only one TCP client at a time. Either run capture.py against TCP 5760
+on its own, or use the mavproxy fan-out above.
 
 ## Mission workflow
 
+The .plan file is QGC's native JSON; ArduPilot reads it as a series of
+MAVLink mission items. Two paths:
+
+### A. Plan + fly in QGC (interactive)
 1. In QGC: **Plan** view → drop waypoints → **Upload** → switch to
    **Fly** view → arm → **Start Mission**.
 2. Save the plan: Plan view → **Sync → Save to file** →
-   `sim/<stack>/missions/<name>.plan`. Commit it.
+   `sim/ardupilot/missions/<name>.plan`. Commit it.
 3. To replay later, **Open** the saved plan in QGC and Upload.
 
-Both stacks load the same `.plan` JSON format, but waypoint behaviour
-may differ slightly between PX4 and ArduPilot (e.g., loiter vs hold
+### B. Headless replay (scriptable, repeatable)
+Plan once in QGC and save the .plan, then drive the autopilot from the
+CLI via `sim/ardupilot/run_mission.py` — uploads the mission, arms,
+takes off, switches to AUTO, and tails progress. QGC stays open as a
+passive observer on 14550 if you want a live map view.
+
+```bash
+# upload only (mission stays armed-disabled until you start it elsewhere)
+.venv/bin/python sim/ardupilot/run_mission.py \
+    sim/ardupilot/missions/square_50m.plan
+
+# upload + arm + takeoff + start AUTO + tail until the last waypoint
+.venv/bin/python sim/ardupilot/run_mission.py \
+    sim/ardupilot/missions/square_50m.plan --auto-start --tail
+```
+
+A reference `square_50m.plan` (takeoff → 50 m square → RTL, 30 m AGL,
+at the default ArduCopter SITL home location near Canberra) lives in
+`sim/ardupilot/missions/`. Use it as a template for your own missions.
+
+Both stacks load the same `.plan` JSON, but waypoint behaviour may
+differ slightly between PX4 and ArduPilot (e.g. loiter vs hold
 semantics). For best comparability, keep missions simple: takeoff,
 waypoint square, land.
 
