@@ -30,6 +30,16 @@ fi
 
 ARDUCOPTER="$ARDUPILOT_DIR/build/sitl/bin/arducopter"
 DEFAULTS="$ARDUPILOT_DIR/Tools/autotest/default_params/copter.parm"
+EXTRA_DEFAULTS="$(dirname "$0")/camera_defaults.parm"
+if [[ -f "$EXTRA_DEFAULTS" ]]; then
+    DEFAULTS="${DEFAULTS},${EXTRA_DEFAULTS}"
+fi
+# Optional comma-separated list of additional .parm files chained at boot,
+# e.g.  EXTRA_PARMS=$ARDUPILOT_DIR/Tools/autotest/default_params/copter-optflow.parm
+# for a GPS-denied / optical-flow EKF profile. See sim/README.md.
+if [[ -n "${EXTRA_PARMS:-}" ]]; then
+    DEFAULTS="${DEFAULTS},${EXTRA_PARMS}"
+fi
 if [[ ! -x "$ARDUCOPTER" ]]; then
     echo "ERROR: arducopter binary not found at $ARDUCOPTER" >&2
     echo "  build it with:  cd \$ARDUPILOT_DIR && ./waf configure --board sitl && ./waf copter" >&2
