@@ -53,6 +53,12 @@ RUN_ARGS=(
     -e LOCAL_USER_ID="$(id -u)"
 )
 
+# Rootless podman maps container UIDs to sub-UIDs on the host, which
+# breaks writes to bind-mounted source. --userns=keep-id maps the
+# container user's UID 1:1 to the host user, so build artifacts land
+# back on the host with the right ownership.
+[[ "$RUNTIME" = "podman" ]] && RUN_ARGS+=( --userns=keep-id )
+
 if [[ "$HEADLESS" = "1" ]]; then
     RUN_ARGS+=( -e HEADLESS=1 )
     GUI_NOTE="(headless: no Gazebo window)"
